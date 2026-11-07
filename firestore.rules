@@ -1,0 +1,105 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global Safety Net: Default Deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Security Helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // Validation Blueprint for Contact Messages
+    function isValidContactMessage(data) {
+      return data.keys().hasAll(['name', 'email', 'subject', 'message', 'createdAt']) &&
+        data.keys().hasOnly(['name', 'email', 'subject', 'message', 'senderId', 'createdAt']) &&
+        data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
+        data.email is string && data.email.size() > 3 && data.email.size() <= 255 &&
+        data.subject is string && data.subject.size() > 0 && data.subject.size() <= 200 &&
+        data.message is string && data.message.size() > 0 && data.message.size() <= 3000 &&
+        (!('senderId' in data) || (data.senderId is string && data.senderId.size() <= 128)) &&
+        data.createdAt == request.time;
+    }
+
+    // Validation Blueprint for User Profiles
+    function isValidUserProfile(data) {
+      return data.keys().hasAll(['uid', 'email', 'createdAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'displayName', 'photoURL', 'createdAt']) &&
+        data.uid is string && data.uid == request.auth.uid &&
+        data.email is string && data.email.size() <= 255 &&
+        (!('displayName' in data) || (data.displayName is string && data.displayName.size() <= 150)) &&
+        (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() <= 500)) &&
+        data.createdAt == request.time;
+    }
+
+    // Validation Blueprint for Project View Counters
+    function isValidProjectView(data) {
+      return data.keys().hasAll(['projectId', 'views', 'lastViewedAt']) &&
+        data.keys().hasOnly(['projectId', 'views', 'lastViewedAt']) &&
+        data.projectId is string && data.projectId.size() <= 128 &&
+        data.views is number && data.views >= 0 &&
+        data.lastViewedAt == request.time;
+    }
+
+    // Contact Messages Collection
+    match /contactMessages/{messageId} {
+      allow create: if isValidId(messageId) && isValidContactMessage(incoming());
+      allow read: if isSignedIn() && (
+        (resource.data.senderId == request.auth.uid) ||
+        (request.auth.token.email == 'bansalshubham182@gmail.com')
+      );
+      allow update, delete: if false; // Inquiries are immutable audit logs
+    }
+
+    // User Profiles Collection
+    match /users/{userId} {
+      allow get: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidId(userId) && isValidUserProfile(incoming());
+      allow update: if isOwner(userId) && isValidUserProfile(incoming()) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL']);
+      allow delete: if false;
+    }
+
+    // Public Project View Counters
+    match /projectViews/{projectId} {
+      allow read: if true;
+      allow create: if isValidId(projectId) && isValidProjectView(incoming());
+      allow update: if isValidId(projectId) && isValidProjectView(incoming()) &&
+        incoming().projectId == existing().projectId &&
+        incoming().views >= existing().views;
+      allow delete: if false;
+    }
+
+    // AI Chat Sessions Telemetry
+    match /chatSessions/{sessionId} {
+      allow read: if true;
+      allow create, update: if isValidId(sessionId) &&
+        incoming().keys().hasAll(['sessionId', 'role', 'model', 'messagesCount', 'updatedAt']) &&
+        incoming().sessionId is string &&
+        incoming().role is string &&
+        incoming().model is string &&
+        incoming().messagesCount is number;
+      allow delete: if false;
+    }
+  }
+}
